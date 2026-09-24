@@ -1,0 +1,18 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+
+# Runtime state
+collector/state/*.cursor
+
+# Environment / secrets
+.env
+.env.*
+*.key
+*.pem
+
+# OS/editor files
+.DS_Store
+.vscode/
+.idea/
