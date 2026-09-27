@@ -16,3 +16,4 @@ collector/state/*.cursor
 .DS_Store
 .vscode/
 .idea/
+collector/
