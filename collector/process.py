@@ -1,6 +1,7 @@
 import os
 import re
 import time
+import subprocess
 
 AUDIT_LOG = "/var/log/audit/audit.log"
 CURSOR_FILE = "state/process.cursor"
@@ -8,6 +9,24 @@ CURSOR_FILE = "state/process.cursor"
 os.makedirs("state", exist_ok=True)
 
 SERIAL_PATTERN = re.compile(r"msg=audit\([^:]+:(\d+)\)")
+
+def get_source_ip(session_id):
+    if not session_id:
+        return None
+
+    session_file = f"/run/systemd/sessions/{session_id}"
+
+    try:
+        with open(session_file, "r") as session:
+            for line in session:
+                if line.startswith("REMOTE_HOST="):
+                    remote_host = line.split("=", 1)[1].strip()
+                    return remote_host if remote_host else None
+
+    except (OSError, ValueError):
+        pass
+
+    return None
 
 
 def save_cursor(position):
@@ -91,8 +110,23 @@ try:
                     'key="ghostwire_process"' in event_line
                     for event_line in current_event
                 ):
-                    for event_line in current_event:
-                        print(event_line, end="")
+                      session_id = None
+                      source_ip = None
+
+                      for event_line in current_event:
+                          session_match = re.search(r"\bses=(\d+)", event_line)
+                          if session_match:
+                              session_id = session_match.group(1)
+                              break
+
+                      if session_id:
+                          source_ip = get_source_ip(session_id)
+
+                      if source_ip:
+                          print(f"[SOURCE_IP={source_ip}]")
+
+                      for event_line in current_event:
+                          print(event_line, end="")
 
                 position = audit.tell()
                 save_cursor(position)
@@ -119,8 +153,23 @@ try:
                 'key="ghostwire_process"' in event_line
                 for event_line in current_event
             ):
-                for event_line in current_event:
-                    print(event_line, end="")
+                  session_id = None
+                  source_ip = None
+
+                  for event_line in current_event:
+                      session_match = re.search(r"\bses=(\d+)", event_line)
+                      if session_match:
+                          session_id = session_match.group(1)
+                          break
+
+                  if session_id:
+                      source_ip = get_source_ip(session_id)
+
+                  if source_ip:
+                      print(f"[SOURCE_IP={source_ip}]")
+
+                  for event_line in current_event:
+                      print(event_line, end="")
 
             position = line_start_position
             save_cursor(position)

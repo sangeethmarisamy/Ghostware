@@ -1,6 +1,8 @@
 import ctypes
 import os
 import struct
+import re
+import time
 
 WATCH_ROOTS = [
     "/home/sangeeth/Desktop",
@@ -48,6 +50,80 @@ EVENT_STRUCT = struct.Struct("iIII")
 
 watch_paths = {}
 watch_descriptors = {}
+
+
+def get_audit_metadata(full_path):
+    audit_log = "/var/log/audit/audit.log"
+
+    result = {
+        "audit_user": None,
+        "audit_session": None,
+        "process": None,
+        "terminal": None,
+    }
+
+    try:
+        with open(audit_log, "r", errors="replace") as audit:
+            audit.seek(0, 2)
+            size = audit.tell()
+            audit.seek(max(0, size - 2_000_000))
+            lines = audit.readlines()
+
+        path_marker = f'name="{full_path}"'
+        serial = None
+
+        for line in reversed(lines):
+            if path_marker not in line:
+                continue
+
+            match = re.search(r"msg=audit\([^:]+:(\d+)\)", line)
+            if match:
+                serial = match.group(1)
+                break
+
+        if serial is None:
+            return result
+
+        event_pattern = re.compile(
+            rf"msg=audit\([^:]+:{re.escape(serial)}\)"
+        )
+
+        for line in lines:
+            if not event_pattern.search(line):
+                continue
+            if "type=SYSCALL" not in line:
+                continue
+
+            match = re.search(r"\bauid=(\d+)", line)
+            if match and match.group(1) != "4294967295":
+                result["audit_user"] = match.group(1)
+
+            match = re.search(r"\bses=(\d+)", line)
+            if match:
+                result["audit_session"] = int(match.group(1))
+
+            match = re.search(r'\bcomm="([^"]+)"', line)
+            if match:
+                result["process"] = match.group(1)
+
+            match = re.search(r"\btty=(\S+)", line)
+            if match and match.group(1) != "(none)":
+                result["terminal"] = match.group(1)
+
+        uid = result["audit_user"]
+        if uid is not None:
+            try:
+                import pwd
+                result["audit_user"] = pwd.getpwuid(int(uid)).pw_name
+            except (KeyError, ValueError, OSError):
+                pass
+
+
+
+    except OSError:
+        pass
+
+    return result
 
 
 def remove_watch(wd):
@@ -120,8 +196,21 @@ try:
 
             full_path = os.path.join(parent, name)
 
-            print(mask, cookie, full_path)
+            audit = get_audit_metadata(full_path)
 
+            fields = []
+            if audit["audit_user"]:
+                fields.append(f"[AUDIT_USER={audit['audit_user']}]")
+            if audit["audit_session"] is not None:
+                fields.append(f"[AUDIT_SESSION={audit['audit_session']}]")
+            if audit["process"]:
+                fields.append(f"[PROCESS={audit['process']}]")
+            if audit["terminal"]:
+                fields.append(f"[TERMINAL={audit['terminal']}]")
+
+            prefix = " ".join(fields)
+            event_line = f"{mask} {cookie} {full_path}"
+            print(f"{prefix} {event_line}".strip(), flush=True)
             if mask & IN_CREATE:
                 if os.path.isdir(full_path):
                     add_recursive(full_path)
