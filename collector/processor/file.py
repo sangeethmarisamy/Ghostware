@@ -1,6 +1,9 @@
 import re
 import socket
 import uuid
+import os
+import pwd
+import time
 from datetime import datetime, timezone
 
 seen_events = set()
@@ -10,6 +13,7 @@ AUDIT_FIELDS = (
     "audit_session",
     "process",
     "terminal",
+    "source_ip",
 )
 
 
@@ -41,7 +45,7 @@ def parse_file_event(raw_line):
             return None
         session = int(session)
 
-    return {
+    event = {
         "source": "file",
         "source_ip": fields.get("SOURCE_IP") or None,
         "audit_user": fields.get("AUDIT_USER") or None,
@@ -54,6 +58,170 @@ def parse_file_event(raw_line):
         "raw": raw_line,
     }
 
+    # If the raw collector did not provide audit attribution,
+    # enrich the event from the matching auditd transaction.
+    if (
+        event["audit_user"] is None
+        or event["audit_session"] is None
+        or event["process"] is None
+        or event["terminal"] is None
+        or event["source_ip"] is None
+    ):
+        audit = get_audit_metadata(
+            path,
+            session_id=event.get("audit_session")
+        )
+
+        for field in AUDIT_FIELDS:
+            if event.get(field) is None and audit.get(field) is not None:
+                event[field] = audit[field]
+
+    return event
+
+def get_audit_metadata(full_path, event_time=None, session_id=None):
+    audit_log = "/var/log/audit/audit.log"
+
+    result = {
+        "audit_user": None,
+        "audit_session": None,
+        "process": None,
+        "terminal": None,
+        "source_ip": None,
+    }
+
+    if event_time is None:
+        event_time = time.time()
+
+    path_marker = f'name="{full_path}"'
+
+    # auditd can write slightly after inotify reports the event.
+    # Retry briefly while looking for the matching PATH transaction.
+    for _ in range(10):
+        try:
+            with open(audit_log, "r", errors="replace") as audit:
+                audit.seek(0, os.SEEK_END)
+                size = audit.tell()
+                audit.seek(max(0, size - 4_000_000))
+                lines = audit.readlines()
+
+            candidates = []
+
+            for line in lines:
+                if path_marker not in line:
+                    continue
+
+                match = re.search(
+                    r"msg=audit\((\d+(?:\.\d+)?):(\d+)\)",
+                    line
+                )
+                if not match:
+                    continue
+
+                timestamp = float(match.group(1))
+                serial = match.group(2)
+                candidates.append((timestamp, serial))
+
+            # If the raw collector already supplied the audit session,
+            # use that session directly instead of relying on wall-clock time.
+            if session_id is not None:
+                session_pattern = re.compile(
+                    rf"\bses={re.escape(str(session_id))}\b"
+                )
+
+                for session_line in lines:
+                    if not session_pattern.search(session_line):
+                        continue
+
+                    if "sshd-session" not in session_line:
+                        continue
+
+                    ip_match = re.search(
+                        r"\baddr=([0-9a-fA-F:.]+)\b",
+                        session_line
+                    )
+
+                    if ip_match:
+                        result["source_ip"] = ip_match.group(1)
+                        break
+
+            if not candidates:
+                if result["source_ip"] is not None:
+                    return result
+                time.sleep(0.1)
+                continue
+
+            timestamp, serial = min(
+                candidates,
+                key=lambda item: abs(item[0] - event_time)
+            )
+
+            if abs(timestamp - event_time) > 5.0:
+                time.sleep(0.1)
+                continue
+
+            transaction_pattern = re.compile(
+                rf"msg=audit\([^:]+:{re.escape(serial)}\)"
+            )
+
+            for line in lines:
+                if not transaction_pattern.search(line):
+                    continue
+
+                if "type=SYSCALL" not in line:
+                    continue
+
+                match = re.search(r"\bauid=(\d+)", line)
+                if match and match.group(1) != "4294967295":
+                    try:
+                        result["audit_user"] = pwd.getpwuid(
+                            int(match.group(1))
+                        ).pw_name
+                    except (KeyError, ValueError, OSError):
+                        result["audit_user"] = match.group(1)
+
+                match = re.search(r"\bses=(\d+)", line)
+                if match:
+                    result["audit_session"] = int(match.group(1))
+
+                match = re.search(r"\bcomm=([^\s]+)", line)
+                if match:
+                    result["process"] = match.group(1)
+
+                match = re.search(r"\btty=(\S+)", line)
+                if match and match.group(1) != "(none)":
+                    result["terminal"] = match.group(1)
+
+                # Resolve remote IP from the SSH audit session.
+                session = result.get("audit_session")
+                if session is not None:
+                    session_pattern = re.compile(
+                        rf"\bses={re.escape(str(session))}\b"
+                    )
+
+                    for session_line in lines:
+                        if not session_pattern.search(session_line):
+                            continue
+
+                        if "sshd-session" not in session_line:
+                            continue
+
+                        ip_match = re.search(
+                            r"\baddr=([0-9a-fA-F:.]+)\b",
+                            session_line
+                        )
+
+                        if ip_match:
+                            result["source_ip"] = ip_match.group(1)
+                            break
+
+                return result
+
+        except OSError:
+            pass
+
+        time.sleep(0.1)
+
+    return result
 
 def validate_file_event(event):
     if not isinstance(event, dict) or event.get("source") != "file":

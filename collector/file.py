@@ -60,57 +60,92 @@ def get_audit_metadata(full_path):
         "audit_session": None,
         "process": None,
         "terminal": None,
+        "source_ip": None,
     }
 
     try:
         with open(audit_log, "r", errors="replace") as audit:
-            audit.seek(0, 2)
+            audit.seek(0, os.SEEK_END)
             size = audit.tell()
-            audit.seek(max(0, size - 2_000_000))
+            audit.seek(max(0, size - 4_000_000))
             lines = audit.readlines()
 
         path_marker = f'name="{full_path}"'
-        serial = None
+        candidates = []
 
-        for line in reversed(lines):
+        for line in lines:
             if path_marker not in line:
                 continue
 
-            match = re.search(r"msg=audit\([^:]+:(\d+)\)", line)
+            match = re.search(
+                r"msg=audit\\((\\d+(?:\\.\\d+)?):(\\d+)\\)",
+                line
+            )
             if match:
-                serial = match.group(1)
-                break
+                candidates.append(match.group(2))
 
-        if serial is None:
+        if not candidates:
             return result
 
-        event_pattern = re.compile(
-            rf"msg=audit\([^:]+:{re.escape(serial)}\)"
-        )
+        for serial in reversed(candidates):
+            event_pattern = re.compile(
+                rf"msg=audit\\([^:]+:{re.escape(serial)}\\)"
+            )
 
-        for line in lines:
-            if not event_pattern.search(line):
-                continue
-            if "type=SYSCALL" not in line:
-                continue
+            session_id = None
 
-            match = re.search(r"\bauid=(\d+)", line)
-            if match and match.group(1) != "4294967295":
-                result["audit_user"] = match.group(1)
+            for line in lines:
+                if not event_pattern.search(line):
+                    continue
 
-            match = re.search(r"\bses=(\d+)", line)
-            if match:
-                result["audit_session"] = int(match.group(1))
+                if "type=SYSCALL" not in line:
+                    continue
 
-            match = re.search(r'\bcomm="([^"]+)"', line)
-            if match:
-                result["process"] = match.group(1)
+                match = re.search(r"\\bauid=(\\d+)", line)
+                if match and match.group(1) != "4294967295":
+                    result["audit_user"] = match.group(1)
 
-            match = re.search(r"\btty=(\S+)", line)
-            if match and match.group(1) != "(none)":
-                result["terminal"] = match.group(1)
+                match = re.search(r"\\bses=(\\d+)", line)
+                if match:
+                    session_id = int(match.group(1))
+                    result["audit_session"] = session_id
+
+                match = re.search(r'\\bcomm="([^"]+)"', line)
+                if match:
+                    result["process"] = match.group(1)
+
+                match = re.search(r"\\btty=(\\S+)", line)
+                if match and match.group(1) != "(none)":
+                    result["terminal"] = match.group(1)
+
+                break
+
+            if session_id is not None:
+                session_pattern = re.compile(
+                    rf"\\bses={re.escape(str(session_id))}\\b"
+                )
+
+                for line in lines:
+                    if not session_pattern.search(line):
+                        continue
+
+                    if "USER_LOGIN" not in line and "sshd-session" not in line:
+                        continue
+
+                    ip_match = re.search(
+                        r"\\baddr=([0-9a-fA-F:.]+)\\b",
+                        line
+                    )
+
+                    if ip_match:
+                        result["source_ip"] = ip_match.group(1)
+                        break
+
+            if result["audit_session"] is not None:
+                break
 
         uid = result["audit_user"]
+
         if uid is not None:
             try:
                 import pwd
@@ -118,13 +153,10 @@ def get_audit_metadata(full_path):
             except (KeyError, ValueError, OSError):
                 pass
 
-
-
     except OSError:
         pass
 
     return result
-
 
 def remove_watch(wd):
     path = watch_paths.pop(wd, None)
