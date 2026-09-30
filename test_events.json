@@ -1,0 +1,90 @@
+[
+  {
+    "event_id": "a6b8faec-a4e5-46f3-abd4-56a86390f39c",
+    "timestamp": "2026-09-29T21:10:52+05:30",
+    "hostname": "Maan",
+    "source": "authentication",
+    "event_type": "login_success",
+    "source_ip": "10.83.235.209",
+    "metadata": {
+      "username": "sangeeth"
+    },
+    "raw": "2026-09-29T21:10:52+05:30 Maan sshd-session[4125]: Accepted password for sangeeth from 10.83.235.209 port 56344 ssh2"
+  },
+  {
+    "event_id": "6a7ed223-774f-4e4f-9c28-0032edc314e3",
+    "timestamp": "2026-09-29T21:09:02+05:30",
+    "hostname": "Maan",
+    "source": "command",
+    "event_type": "sudo_session_close",
+    "source_ip": null,
+    "metadata": {
+      "pid": "3713",
+      "username": null,
+      "tty": null,
+      "pwd": null,
+      "target_user": "root",
+      "command": null
+    },
+    "raw": "2026-09-29T21:09:02+05:30 Maan sudo[3713]: pam_unix(sudo:session): session closed for user root"
+  },
+  {
+    "event_id": "77823801-39f3-461a-aa19-eeb70d92a1a7",
+    "timestamp": "2026-09-29T15:45:01.833941+00:00",
+    "hostname": "Maan",
+    "source": "file",
+    "event_type": "file_modify",
+    "source_ip": null,
+    "metadata": {
+      "mask": 2,
+      "cookie": 0,
+      "path": "/home/sangeeth/Projects/ghostware/collector/state/process.cursor"
+    },
+    "raw": "2 0 /home/sangeeth/Projects/ghostware/collector/state/process.cursor"
+  },
+  {
+    "event_id": "8ea2d7ab-e3f1-41a5-8d22-4ce6a42944b1",
+    "timestamp": "2026-09-29T15:40:08.176000+00:00",
+    "hostname": "Maan",
+    "source": "process",
+    "event_type": "process_start",
+    "source_ip": null,
+    "metadata": {
+      "syscall": "59",
+      "pid": "4070",
+      "ppid": "4058",
+      "auid": "1000",
+      "uid": "0",
+      "tty": "pts2",
+      "session_id": "4",
+      "comm": "androiddump",
+      "exe": "/usr/libexec/wireshark/extcap/androiddump",
+      "exit_code": "0"
+    },
+    "raw": "type=SYSCALL msg=audit(1790696408.176:17741): arch=c000003e syscall=59 success=yes exit=0 a0=7fa434000bb0 a1=7fa434000b80 a2=7ffe18a03ef8 a3=0 items=3 ppid=4058 pid=4070 auid=1000 uid=0 gid=0 euid=0 suid=0 fsuid=0 egid=0 euid=0 ..."
+  },
+  {
+    "event_id": "0e1a92fb-e006-4faa-8c0a-efe8a78d0335",
+    "timestamp": "1790696413.490966251",
+    "hostname": "Maan",
+    "source": "network",
+    "event_type": "network_packet",
+    "source_ip": "2606:4700:83b1:d8b7:9afd:442:ccf5:ac50",
+    "metadata": {
+      "interface": "wlan0",
+      "ipv4_src": "",
+      "ipv4_dst": "",
+      "ipv6_src": "2606:4700:83b1:d8b7:9afd:442:ccf5:ac50",
+      "ipv6_dst": "2409:40f4:2018:1a00:b18f:29dc:c4a2:a443",
+      "protocol": "6",
+      "ipv6_next_header": "6",
+      "tcp_src_port": "443",
+      "tcp_dst_port": "40756",
+      "tcp_flags": "0x0018",
+      "udp_src_port": "",
+      "udp_dst_port": "",
+      "frame_length": "110"
+    },
+    "raw": "1790696413.490966251\twlan0\t\t\t2606:4700:83b1:d8b7:9afd:442:ccf5:ac50\t2409:40f4:2018:1a00:b18f:29dc:c4a2:a443\t\t6\t443\t40756\t0x0018\t\t\t110"
+  }
+]

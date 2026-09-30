@@ -1,0 +1,20 @@
+{
+  "window_seconds": 60,
+  "baseline_path": "receiver/data/baseline.json",
+  "baseline_seed_path": "training/data/training_data.csv",
+  "baseline_min_samples": 30,
+  "baseline_z_threshold": 2.5,
+  "correlation_z_threshold": 2.5,
+  "correlation_pair_weight": 0.12,
+  "correlation_category_weight": 0.08,
+  "ml_score_scale": 8.0,
+  "risk_weights": {"ml": 0.35, "statistical": 0.4, "correlation": 0.25},
+  "thresholds": {"suspicious": 0.55, "critical": 0.82},
+  "related_pairs": [["authentication", "privilege_escalation"], ["authentication", "process"],
+    ["privilege_escalation", "process"], ["process", "network"], ["file", "process"],
+    ["cron", "process"], ["cron", "network"]],
+  "evidence": {"endpoint_env": "GHOSTWARE_MINIO_ENDPOINT", "access_key_env": "GHOSTWARE_MINIO_ACCESS_KEY",
+    "secret_key_env": "GHOSTWARE_MINIO_SECRET_KEY", "bucket": "ghostware-evidence", "secure": true,
+    "ledger_path": "receiver/data/integrity_ledger.jsonl"},
+  "model_path": "training/model/anomaly_model.pkl"
+}

@@ -1,15 +1,27 @@
 import pandas as pd
 import joblib
+from pathlib import Path
 
 from sklearn.ensemble import IsolationForest
 
 
-DATA_PATH = "training/data/training_data.csv"
-MODEL_PATH = "training/model/anomaly_model.pkl"
+ROOT = Path(__file__).resolve().parent.parent
+DATA_PATH = ROOT / "training/data/training_data.csv"
+MODEL_PATH = ROOT / "training/model/anomaly_model.pkl"
+FEATURES = [
+    "failed_login_count", "successful_login_count", "sudo_count", "process_count",
+    "network_connection_count", "unique_destination_ip_count", "file_event_count", "cron_event_count",
+]
 
 
 # Load training data
 df = pd.read_csv(DATA_PATH)
+missing = set(FEATURES) - set(df.columns)
+if missing:
+    raise ValueError(f"Training telemetry is missing features: {sorted(missing)}")
+df = df[FEATURES].apply(pd.to_numeric, errors="raise")
+if df.empty or not df.notna().all().all():
+    raise ValueError("Training telemetry must contain finite feature values")
 
 print("Training data loaded")
 print(f"Rows: {len(df)}")

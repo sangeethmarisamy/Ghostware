@@ -17,3 +17,8 @@ collector/state/*.cursor
 .vscode/
 .idea/
 collector/
+!collector/
+collector/*
+!collector/transport.py
+receiver/data/baseline.json
+receiver/data/integrity_ledger.jsonl
