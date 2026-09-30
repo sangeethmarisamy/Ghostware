@@ -23,7 +23,7 @@ CATEGORY_FEATURES = {
 }
 DEFAULT_CONFIG = {
     "window_seconds": 60, "baseline_path": "receiver/data/baseline.json",
-    "baseline_seed_path": "training/data/training_data.csv", "baseline_min_samples": 30,
+    "baseline_seed_path": "data/training_data.csv", "baseline_min_samples": 30,
     "baseline_z_threshold": 2.5, "correlation_z_threshold": 2.5, "correlation_pair_weight": 0.12,
     "correlation_category_weight": 0.08, "ml_score_scale": 8.0,
     "risk_weights": {"ml": 0.35, "statistical": 0.40, "correlation": 0.25},
@@ -34,7 +34,7 @@ DEFAULT_CONFIG = {
     "evidence": {"endpoint_env": "GHOSTWARE_MINIO_ENDPOINT", "access_key_env": "GHOSTWARE_MINIO_ACCESS_KEY",
         "secret_key_env": "GHOSTWARE_MINIO_SECRET_KEY", "bucket": "ghostware-evidence", "secure": True,
         "ledger_path": "receiver/data/integrity_ledger.jsonl"},
-    "model_path": "training/model/anomaly_model.pkl",
+    "model_path": "model/anomaly_model.pkl",
 }
 
 
@@ -52,11 +52,16 @@ def load_config(path=None):
 
 
 def _parse_timestamp(value):
-    if not value:
+    if value is None or value == "":
         return datetime.now(timezone.utc)
     if isinstance(value, (int, float)):
         return datetime.fromtimestamp(value, timezone.utc)
-    parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    value = str(value).strip()
+    try:
+        return datetime.fromtimestamp(float(value), timezone.utc)
+    except ValueError:
+        pass
+    parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
     return parsed.replace(tzinfo=timezone.utc) if parsed.tzinfo is None else parsed.astimezone(timezone.utc)
 
 
@@ -64,7 +69,10 @@ def normalize_event(event):
     if not isinstance(event, dict):
         raise ValueError("Each telemetry message must be a JSON object")
     normalized = dict(event)
-    normalized["host"] = str(event.get("host") or "unknown")
+    metadata = event.get("metadata")
+    metadata = metadata if isinstance(metadata, dict) else {}
+    normalized["host"] = str(event.get("host") or event.get("hostname") or "unknown")
+    normalized["username"] = event.get("username") or metadata.get("username")
     normalized["timestamp"] = _parse_timestamp(event.get("timestamp")).isoformat()
     return normalized
 
@@ -75,9 +83,14 @@ class FeatureExtractor:
     def extract(self, event):
         data = event.get("event", {})
         data = data if isinstance(data, dict) else {"message": str(data)}
-        message = str(data.get("message") or event.get("message") or event.get("raw") or "")
         source = str(event.get("source") or event.get("category") or event.get("type") or "").lower()
-        text = f"{source} {message}".lower()
+        event_type = str(event.get("event_type") or "").lower()
+        raw_text = str(event.get("raw") or "").lower()
+        message = str(data.get("message") or event.get("message") or "")
+        if not message and not source and not event_type:
+            message = raw_text
+        text = re.sub(r"[_-]+", " ", f"{source} {event_type} {message}").lower()
+        authentication_text = f"{text} {raw_text}"
         delta = {feature: 0.0 for feature in FEATURES}
         categories = set()
         explicit_features = event.get("features")
@@ -94,13 +107,13 @@ class FeatureExtractor:
                 if any(delta[name] > 0 for name in names))
             return delta, categories, self._destination_ip(event, data)
 
-        if any(token in text for token in ("authentication", "ssh", "login", "pam", "password")):
+        if any(token in authentication_text for token in ("authentication", "ssh", "login", "pam", "password")):
             categories.add("authentication")
-            if any(token in text for token in ("failed", "failure", "invalid user", "authentication error")):
+            if any(token in authentication_text for token in ("failed", "failure", "invalid user", "authentication error")):
                 delta["failed_login_count"] = 1
-            elif any(token in text for token in ("accepted", "successful", "login success", "session opened")):
+            elif any(token in authentication_text for token in ("accepted", "successful", "login success", "session opened")):
                 delta["successful_login_count"] = 1
-        if any(token in text for token in ("sudo", "privilege", "polkit")):
+        if any(token in f"{text} {raw_text}" for token in ("sudo", "privilege", "polkit")):
             categories.add("privilege_escalation")
             delta["sudo_count"] = 1
         if any(token in text for token in ("process", "execve", "command")):
@@ -123,9 +136,22 @@ class FeatureExtractor:
 
     @staticmethod
     def _destination_ip(event, data):
-        candidate = data.get("destination_ip") or data.get("dst_ip") or event.get("destination_ip")
+        metadata = event.get("metadata")
+        metadata = metadata if isinstance(metadata, dict) else {}
+        event_context = " ".join(str(event.get(key) or "")
+            for key in ("source", "category", "type", "event_type")).lower()
+        is_network_event = any(token in event_context for token in ("network", "connection", "tcp", "udp", "dns"))
+        candidate = (data.get("destination_ip") or data.get("dst_ip") or event.get("destination_ip")
+            or metadata.get("destination_ip") or metadata.get("dst_ip") or metadata.get("ipv4_dst")
+            or metadata.get("ipv6_dst"))
         if candidate:
             return str(candidate)
+        if is_network_event:
+            candidate = event.get("remote_ip") or metadata.get("remote_ip")
+            if candidate:
+                return str(candidate)
+        elif event_context.strip():
+            return None
         message = str(data.get("message") or event.get("message") or event.get("raw") or "")
         return next(iter(re.findall(r"(?<![\w.])(?:\d{1,3}\.){3}\d{1,3}(?![\w.])", message)), None)
 
@@ -236,21 +262,29 @@ class IsolationForestDetector:
         self.model = None
         self.score_scale = float(score_scale)
         path = Path(model_path)
-        if path.exists():
-            try:
-                import joblib
-                self.model = joblib.load(path)
-            except Exception as error:
-                print(f"Isolation Forest unavailable: {error}")
+        if not path.is_file():
+            raise FileNotFoundError(f"Trained Isolation Forest model not found: {path}")
+        import joblib
+        self.model = joblib.load(path)
 
-    def score(self, features):
-        if self.model is None:
-            return 0.0
+    def predict(self, features):
         import pandas as pd
-        row = pd.DataFrame([{feature: features[feature] for feature in FEATURES}], columns=FEATURES)
+        row = pd.DataFrame([[features[feature] for feature in FEATURES]], columns=FEATURES)
+        print("[MODEL INPUT]")
+        for feature in FEATURES:
+            print(f"{feature} = {features[feature]}")
+        prediction_label = int(self.model.predict(row)[0])
         decision = float(self.model.decision_function(row)[0])
         scaled = max(-60.0, min(60.0, -decision * self.score_scale))
-        return 1.0 / (1.0 + math.exp(-scaled))
+        ml_score = 1.0 / (1.0 + math.exp(-scaled))
+        prediction = "ANOMALY" if prediction_label == -1 else "NORMAL"
+        print("[MODEL OUTPUT]")
+        print(f"prediction = {prediction} (label={prediction_label})")
+        print(f"anomaly_score = {decision:.6f}")
+        return prediction, decision, ml_score
+
+    def score(self, features):
+        return self.predict(features)[2]
 
 
 class CorrelationEngine:
@@ -395,21 +429,40 @@ class DetectionPipeline:
     def process(self, event):
         with self.lock:
             normalized = normalize_event(event)
+            local_ip = normalized.get("local_ip")
+            remote_ip = normalized.get("remote_ip")
+            if local_ip and remote_ip and local_ip != remote_ip:
+                return {"status": "ANOMALY", "risk_level": "HIGH",
+                    "reason": "LOCAL_REMOTE_IP_MISMATCH", "username": normalized.get("username"),
+                    "local_ip": local_ip, "remote_ip": remote_ip, "action": "BLOCK_REMOTE_IP"}
             delta, event_categories, destination_ip = self.extractor.extract(normalized)
             features, _, window_events = self.aggregator.add(normalized, delta, event_categories, destination_ip)
+            failed_login_count = int(features["failed_login_count"])
+            if failed_login_count > 10:
+                return {"status": "ANOMALY", "reason": "EXCESSIVE_FAILED_LOGINS",
+                    "username": normalized.get("username"), "local_ip": local_ip, "remote_ip": remote_ip,
+                    "failed_login_count": failed_login_count, "action": "BLOCK_IP"}
             statistical_score, z_scores = self.statistical.score(features)
-            ml_score = self.ml.score(features)
+            prediction, anomaly_score, ml_score = self.ml.predict(features)
             correlation_score, category_severity = self.correlation.score(z_scores)
             risk_score, level = self.risk.assess(ml_score, statistical_score, correlation_score)
+            print(f"[RISK] risk_score = {risk_score:.6f}; risk_level = {level}")
+            model_anomaly = prediction == "ANOMALY"
+            combined_anomaly = level != "NORMAL"
             result = {"host": normalized["host"], "window_seconds": self.config["window_seconds"],
                 "features": features, "scores": {"ml": round(ml_score, 6), "statistical": round(statistical_score, 6),
                     "correlation": round(correlation_score, 6), "risk": round(risk_score, 6)},
                 "category_severity": {key: round(value, 6) for key, value in category_severity.items()},
                 "level": level, "interpretation": "Behavioral deviation is not proof of an attack.",
-                "event_count": len(window_events)}
-            if level == "NORMAL":
+                "event_count": len(window_events), "status": "ANOMALY" if model_anomaly or combined_anomaly else "NORMAL",
+                "reason": "ML_BEHAVIORAL_DEVIATION" if model_anomaly else
+                    ("COMBINED_RISK_THRESHOLD" if combined_anomaly else "NO_ANOMALY_DETECTED"),
+                "prediction": prediction, "anomaly_score": anomaly_score, "risk_score": risk_score}
+            if result["status"] == "ANOMALY":
+                result["action"] = "ALERT"
+            if result["status"] == "NORMAL":
                 self.baseline.update(features)
-            else:
+            elif level != "NORMAL":
                 self._preserve_evidence(normalized, window_events, result)
             return result
 
