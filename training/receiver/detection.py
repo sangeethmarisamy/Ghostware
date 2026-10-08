@@ -65,6 +65,36 @@ def _parse_timestamp(value):
     return parsed.replace(tzinfo=timezone.utc) if parsed.tzinfo is None else parsed.astimezone(timezone.utc)
 
 
+def unpack_payload(payload):
+    """Expand supported batch envelopes into individual event dictionaries."""
+    if not isinstance(payload, dict):
+        raise ValueError("Telemetry payload must be a JSON object")
+    events = payload.get("events")
+    payload_type = str(payload.get("type") or payload.get("event_type") or "").lower()
+    if events is None and payload_type not in {"context_batch", "event_batch", "security_event", "security_events"}:
+        return [payload]
+    if not isinstance(events, list):
+        raise ValueError("Batch payload must contain an events array")
+    outer_context = payload.get("context") if isinstance(payload.get("context"), dict) else {}
+    outer_fields = {key: value for key, value in payload.items() if key not in {"events", "context"}}
+    unpacked = []
+    for item in events:
+        if not isinstance(item, dict):
+            raise ValueError("Each batch event must be a JSON object")
+        nested_event = item.get("event") if isinstance(item.get("event"), dict) else item
+        item_context = item.get("context") if isinstance(item.get("context"), dict) else {}
+        event = dict(outer_fields)
+        event.update({key: value for key, value in item.items() if key not in {"event", "context"}})
+        event.update(nested_event)
+        context = dict(outer_context)
+        context.update(item_context)
+        if context:
+            event["context"] = context
+        event["original_event"] = item
+        unpacked.append(event)
+    return unpacked
+
+
 def normalize_event(event):
     if not isinstance(event, dict):
         raise ValueError("Each telemetry message must be a JSON object")
@@ -431,17 +461,10 @@ class DetectionPipeline:
             normalized = normalize_event(event)
             local_ip = normalized.get("local_ip")
             remote_ip = normalized.get("remote_ip")
-            if local_ip and remote_ip and local_ip != remote_ip:
-                return {"status": "ANOMALY", "risk_level": "HIGH",
-                    "reason": "LOCAL_REMOTE_IP_MISMATCH", "username": normalized.get("username"),
-                    "local_ip": local_ip, "remote_ip": remote_ip, "action": "BLOCK_REMOTE_IP"}
+            ip_mismatch = bool(local_ip and remote_ip and local_ip != remote_ip)
             delta, event_categories, destination_ip = self.extractor.extract(normalized)
             features, _, window_events = self.aggregator.add(normalized, delta, event_categories, destination_ip)
             failed_login_count = int(features["failed_login_count"])
-            if failed_login_count > 10:
-                return {"status": "ANOMALY", "reason": "EXCESSIVE_FAILED_LOGINS",
-                    "username": normalized.get("username"), "local_ip": local_ip, "remote_ip": remote_ip,
-                    "failed_login_count": failed_login_count, "action": "BLOCK_IP"}
             statistical_score, z_scores = self.statistical.score(features)
             prediction, anomaly_score, ml_score = self.ml.predict(features)
             correlation_score, category_severity = self.correlation.score(z_scores)
@@ -449,22 +472,46 @@ class DetectionPipeline:
             print(f"[RISK] risk_score = {risk_score:.6f}; risk_level = {level}")
             model_anomaly = prediction == "ANOMALY"
             combined_anomaly = level != "NORMAL"
-            result = {"host": normalized["host"], "window_seconds": self.config["window_seconds"],
+            result = {"host": normalized["host"], "username": normalized.get("username"),
+                "local_ip": local_ip, "remote_ip": remote_ip, "host_ip": normalized.get("host_ip"),
+                "event_id": normalized.get("event_id"), "request_id": normalized.get("request_id"),
+                "window_seconds": self.config["window_seconds"],
                 "features": features, "scores": {"ml": round(ml_score, 6), "statistical": round(statistical_score, 6),
                     "correlation": round(correlation_score, 6), "risk": round(risk_score, 6)},
                 "category_severity": {key: round(value, 6) for key, value in category_severity.items()},
-                "level": level, "interpretation": "Behavioral deviation is not proof of an attack.",
+                "level": level, "risk_level": "HIGH" if anomaly_score < 0 else level,
+                "interpretation": "Behavioral deviation is not proof of an attack.",
                 "event_count": len(window_events), "status": "ANOMALY" if model_anomaly or combined_anomaly else "NORMAL",
                 "reason": "ML_BEHAVIORAL_DEVIATION" if model_anomaly else
                     ("COMBINED_RISK_THRESHOLD" if combined_anomaly else "NO_ANOMALY_DETECTED"),
                 "prediction": prediction, "anomaly_score": anomaly_score, "risk_score": risk_score}
-            if result["status"] == "ANOMALY":
+            if ip_mismatch:
+                result.update({"status": "ANOMALY", "risk_level": "HIGH",
+                    "reason": "LOCAL_REMOTE_IP_MISMATCH", "action": "BLOCK_REMOTE_IP"})
+            elif failed_login_count > 10:
+                result.update({"status": "ANOMALY", "reason": "EXCESSIVE_FAILED_LOGINS",
+                    "action": "BLOCK_IP", "failed_login_count": failed_login_count})
+            if result["status"] == "ANOMALY" and "action" not in result:
                 result["action"] = "ALERT"
             if result["status"] == "NORMAL":
                 self.baseline.update(features)
             elif level != "NORMAL":
                 self._preserve_evidence(normalized, window_events, result)
             return result
+
+    def process_event(self, event):
+        """Compatibility entrypoint for the streaming WebSocket receiver."""
+        normalized = normalize_event(event)
+        delta, _, _ = self.extractor.extract(normalized)
+        result = self.process(normalized)
+        result.setdefault("event_id", normalized.get("event_id"))
+        result.setdefault("request_id", normalized.get("request_id"))
+        result.setdefault("source", normalized.get("source"))
+        result.setdefault("event_type", normalized.get("event_type"))
+        result.setdefault("host_ip", normalized.get("host_ip"))
+        result.setdefault("event_features", delta)
+        result.setdefault("persistence", "not_configured")
+        return result
 
     def _preserve_evidence(self, event, window_events, result):
         try:
