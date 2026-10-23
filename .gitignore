@@ -16,3 +16,11 @@ collector/state/*.cursor
 .DS_Store
 .vscode/
 .idea/
+
+# Virtual environment
+.venv/
+venv/
+ENV/
+
+# Desktop/File manager
+.directory
